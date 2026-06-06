@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="hi">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0f766e" />
+    <title>Sheet Search</title>
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <button id="btnMenu" class="icon-btn" aria-label="Menu">☰</button>
+      <div class="topbar__title">
+        <div class="app-title">Sheet Search</div>
+        <div id="statusLine" class="status">Ready</div>
+      </div>
+      <button id="btnRefresh" class="icon-btn" aria-label="Refresh">⟳</button>
+    </header>
+
+    <!-- Side Drawer (main screen par nahi, side me) -->
+    <aside id="drawer" class="drawer" aria-hidden="true">
+      <div class="drawer__header">
+        <div class="drawer__title">Connected Sheets</div>
+        <button id="btnCloseDrawer" class="icon-btn" aria-label="Close">✕</button>
+      </div>
+
+      <div class="drawer__section">
+        <label class="label">Fixed Sheet (Locked)</label>
+        <ul id="sheetList" class="sheet-list"></ul>
+        <div class="hint">
+          Ye app <b>single fixed sheet</b> ke liye locked hai. User isko add/remove/delete nahi kar sakta.
+          <br />
+          Sheet ko <b>Anyone with the link</b> rakho. Best: “Publish to web” enabled.
+        </div>
+      </div>
+
+      <!-- Locked mode: add form disabled but kept in DOM to avoid JS errors -->
+      <div class="drawer__section" style="display:none">
+        <label class="label">Add new sheet</label>
+        <form id="addForm" class="form">
+          <input id="sheetUrl" class="input" type="url" placeholder="Google Sheet URL paste karo" required />
+          <input id="sheetName" class="input" type="text" placeholder="Display name (optional)" />
+          <input id="tabName" class="input" type="text" placeholder="Compile tab name (optional, e.g. COMPILE)" />
+          <button class="btn" type="submit">Add</button>
+        </form>
+      </div>
+
+      <div class="drawer__section">
+        <label class="label">Auto Refresh</label>
+        <div class="row">
+          <div class="pill">Every 5 minutes</div>
+          <button id="btnClearCache" class="btn btn--ghost" type="button">Clear Cache</button>
+        </div>
+      </div>
+    </aside>
+    <div id="backdrop" class="backdrop" hidden></div>
+
+    <!-- Main Screen: sirf search + results -->
+    <main class="main">
+      <div class="search-card">
+        <input
+          id="searchInput"
+          class="search"
+          type="search"
+          placeholder="Search (starts-with)…"
+          autocomplete="off"
+          autocapitalize="none"
+          spellcheck="false"
+        />
+        <div class="row row--gap">
+          <select id="scopeSelect" class="select" aria-label="Search scope">
+            <option value="__all__">All Sheets</option>
+          </select>
+          <div id="lastUpdated" class="muted">—</div>
+        </div>
+      </div>
+
+      <section>
+        <div id="resultMeta" class="muted"></div>
+        <ul id="results" class="results"></ul>
+      </section>
+    </main>
+
+    <!-- Detail Modal -->
+    <dialog id="detailDialog" class="dialog">
+      <div class="dialog__header">
+        <div id="detailTitle" class="dialog__title">Details</div>
+        <button id="btnCloseDetail" class="icon-btn" aria-label="Close">✕</button>
+      </div>
+      <div id="detailBody" class="dialog__body"></div>
+    </dialog>
+
+    <script src="./app.js"></script>
+    <script>
+      if ("serviceWorker" in navigator) {
+        navigator.serviceWorker.register("./sw.js").catch(() => {});
+      }
+    </script>
+  </body>
+</html>
