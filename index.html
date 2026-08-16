@@ -34,7 +34,7 @@
           <br />
           Sheet ko <b>Anyone with the link</b> rakho. Best: “Publish to web” enabled.
           <br /><br />
-          <b>Current + pichle mahine ka tab</b> khud dhoondh ke data jodta hai (jaise "AUG-2026 TOTAL" + "JULY-2026") — sheet me naya mahina tab banate hi agle refresh me app khud switch ho jayega, kuch change karne ki zaroorat nahi.
+          <b>Default me sirf current mahine</b> ka data search hota hai (jaise "AUG-2026 TOTAL"). Search box ke bagal wale dropdown se koi bhi purana mahina select karke us mahine ka data bhi search kar sakte ho.
           <br />
           Har tab ke andar jo "…TOTAL" wali summary line hoti hai, wo automatically hide ho jati hai.
           <br />
@@ -70,14 +70,14 @@
           id="searchInput"
           class="search"
           type="search"
-          placeholder="Search (starts-with)…"
+          placeholder="Search…"
           autocomplete="off"
           autocapitalize="none"
           spellcheck="false"
         />
         <div class="row row--gap">
-          <select id="scopeSelect" class="select" aria-label="Search scope">
-            <option value="__all__">All Sheets</option>
+          <select id="scopeSelect" class="select" aria-label="Month">
+            <option value="">Loading months…</option>
           </select>
           <div id="lastUpdated" class="muted">—</div>
         </div>

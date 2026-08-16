@@ -68,6 +68,12 @@
   const cacheMap = new Map();
   let searchRunId = 0;
 
+  // ====== SELECTED MONTH ======
+  // Default hamesha CURRENT calendar month hai. Dropdown se user purane mahine bhi search kar sakta hai.
+  const _now0 = new Date();
+  let selectedYear = _now0.getFullYear();
+  let selectedMonthIdx = _now0.getMonth();
+
   // DOM
   const btnMenu = $("#btnMenu");
   const btnRefresh = $("#btnRefresh");
@@ -175,7 +181,14 @@
       void runSearchLive({ forceRefresh: false });
     }, LIVE_SEARCH_DEBOUNCE_MS)
   );
-  scopeSelect.addEventListener("change", () => void runSearchLive({ forceRefresh: true }));
+  scopeSelect.addEventListener("change", () => {
+    const [y, m] = scopeSelect.value.split("-").map(Number);
+    if (!Number.isNaN(y) && !Number.isNaN(m)) {
+      selectedYear = y;
+      selectedMonthIdx = m;
+    }
+    void runSearchLive({ forceRefresh: true });
+  });
 
   btnCloseDetail.addEventListener("click", () => detailDialog.close());
   detailDialog.addEventListener("click", (e) => {
@@ -220,34 +233,22 @@
 
   async function refreshSheet(sheet) {
     const now = new Date();
-    const curY = now.getFullYear();
-    const curM = now.getMonth();
-    let prevY = curY;
-    let prevM = curM - 1;
-    if (prevM < 0) {
-      prevM = 11;
-      prevY -= 1;
+    const isCurrentSelection = selectedYear === now.getFullYear() && selectedMonthIdx === now.getMonth();
+
+    const resolved = await resolveMonthTab(sheet.id, selectedYear, selectedMonthIdx, { preferTotal: isCurrentSelection });
+    if (!resolved || !resolved.table) {
+      throw new Error("Is mahine ka tab nahi mila (tab naam check karo)");
     }
 
-    const curResolved = await resolveMonthTab(sheet.id, curY, curM, { preferTotal: true });
-    const prevResolved = await resolveMonthTab(sheet.id, prevY, prevM, { preferTotal: false });
-
-    const tables = [curResolved, prevResolved].filter((r) => r && r.table);
-    if (tables.length === 0) {
-      throw new Error("Current/pichle mahine ka tab nahi mila (tab naam check karo)");
-    }
-
-    let mergedRows = [];
-    for (const r of tables) {
-      const parsed = parseGvizTable(r.table);
-      mergedRows = mergedRows.concat(parsed.rows);
-    }
+    const parsed = parseGvizTable(resolved.table, selectedYear, selectedMonthIdx);
 
     const payload = {
       headers: WANTED_COLUMNS.slice(),
-      rows: mergedRows,
+      rows: parsed.rows,
       updatedAt: Date.now(),
-      tabs: tables.map((r) => r.tabName),
+      tab: resolved.tabName,
+      forYear: selectedYear,
+      forMonth: selectedMonthIdx,
     };
     cacheMap.set(sheetKey(sheet), payload);
     localStorage.setItem(STORAGE_CACHE_PREFIX + sheetKey(sheet), JSON.stringify(payload));
@@ -320,9 +321,8 @@
   async function runSearchLive({ forceRefresh }) {
     const myRunId = ++searchRunId;
     const q = (searchInput.value || "").trim().toLowerCase();
-    const scope = scopeSelect.value;
 
-    const scopeKeys = getScopeSheetKeys(scope);
+    const scopeKeys = sheets.map(sheetKey);
     if (scopeKeys.length === 0) {
       resultsEl.innerHTML = "";
       resultMeta.textContent = "Drawer se sheet add karo.";
@@ -332,7 +332,7 @@
     const matches = [];
     if (q.length === 0) {
       resultsEl.innerHTML = "";
-      resultMeta.textContent = "Search type karo… (current + pichla mahina)";
+      resultMeta.textContent = "Search type karo… (dropdown se mahina badal sakte ho)";
       setSearchLoading(false);
       return;
     }
@@ -360,7 +360,7 @@
 
       for (let i = 0; i < rows.length; i++) {
         const row = rows[i];
-        if (rowStartsWith(row, q)) {
+        if (rowMatches(row, q)) {
           matches.push({ key, sheetName: sheet.name, headers, row, index: i });
         }
       }
@@ -399,10 +399,11 @@
         if (!s) continue;
         const cached = cacheMap.get(key);
         const age = cached?.updatedAt ? Date.now() - cached.updatedAt : Number.POSITIVE_INFINITY;
+        const monthMismatch = !cached || cached.forYear !== selectedYear || cached.forMonth !== selectedMonthIdx;
         // user ne bola: "search par sheet se hi uthao" → yaha live refresh.
-        // BUT spam avoid: 20 sec me max 1 fetch (per sheet).
+        // BUT spam avoid: 20 sec me max 1 fetch (per sheet). Mahina switch hote hi turant refresh karo.
         const needLive = age > LIVE_REFRESH_GAP_MS;
-        if (forceRefresh || needLive) {
+        if (forceRefresh || needLive || monthMismatch) {
           try {
             await refreshSheet(s);
           } catch (e) {
@@ -415,11 +416,18 @@
     });
   }
 
-  function rowStartsWith(row, q) {
-    // starts-with: kisi bhi cell ka beginning match
+  function rowMatches(row, q) {
+    // "contains anywhere" match — plus punctuation-stripped match taaki
+    // "PU11082613121" jaise IDs me embedded date/number bhi mil jaye ("110826" jaisa search).
+    const qAlnum = q.replace(/[^a-z0-9]/g, "");
     for (const v of row) {
       const s = (v ?? "").toString().trim().toLowerCase();
-      if (s.startsWith(q)) return true;
+      if (!s) continue;
+      if (s.includes(q)) return true;
+      if (qAlnum) {
+        const sAlnum = s.replace(/[^a-z0-9]/g, "");
+        if (sAlnum.includes(qAlnum)) return true;
+      }
     }
     return false;
   }
@@ -522,9 +530,7 @@
       const key = sheetKey(s);
       const cached = cacheMap.get(key);
       const updated = cached?.updatedAt ? formatTime(cached.updatedAt) : "not cached";
-      const meta = [s.tabName ? `tab: ${s.tabName}` : null, s.gid ? `gid: ${s.gid}` : null, `updated: ${updated}`]
-        .filter(Boolean)
-        .join(" • ");
+      const meta = [cached?.tab ? `tab: ${cached.tab}` : null, `updated: ${updated}`].filter(Boolean).join(" • ");
 
       const li = document.createElement("li");
       li.className = "sheet-item";
@@ -573,18 +579,25 @@
   }
 
   function renderScopeOptions() {
-    const prev = scopeSelect.value;
-    const opts = [`<option value="__all__">All Sheets</option>`].concat(
-      sheets.map((s) => `<option value="${escapeHtml(sheetKey(s))}">${escapeHtml(s.name)}</option>`)
-    );
+    const now = new Date();
+    const opts = [];
+    for (let i = 0; i < 12; i++) {
+      let m = now.getMonth() - i;
+      let y = now.getFullYear();
+      while (m < 0) {
+        m += 12;
+        y -= 1;
+      }
+      const label = titleCase(MONTH_FULL[m]) + " " + y;
+      const text = i === 0 ? `Current — ${label}` : label;
+      opts.push(`<option value="${y}-${m}">${escapeHtml(text)}</option>`);
+    }
     scopeSelect.innerHTML = opts.join("");
-    // restore previous selection if possible
-    if ([...scopeSelect.options].some((o) => o.value === prev)) scopeSelect.value = prev;
+    scopeSelect.value = `${selectedYear}-${selectedMonthIdx}`;
   }
 
-  function getScopeSheetKeys(scope) {
-    if (scope === "__all__") return sheets.map(sheetKey);
-    return sheets.some((s) => sheetKey(s) === scope) ? [scope] : [];
+  function titleCase(s) {
+    return s.charAt(0) + s.slice(1).toLowerCase();
   }
 
   function sheetKey(sheet) {
@@ -731,7 +744,7 @@
     });
   }
 
-  function parseGvizTable(table) {
+  function parseGvizTable(table, targetYear, targetMonth) {
     if (!table) return { headers: WANTED_COLUMNS.slice(), rows: [] };
 
     const rawHeaders = (table.cols || []).map((c, idx) => (c?.label || c?.id || `Col ${idx + 1}`).toString());
@@ -758,10 +771,8 @@
     const complainDatePos = WANTED_COLUMNS.findIndex((n) => normalizeHeader(n) === "COMPLAIN DATE");
     const complainDateColIdx = complainDatePos >= 0 ? wantedIndices[complainDatePos] : -1;
 
-    // allowed calendar months: current mahina + pichla mahina
-    const now = new Date();
-    const currentYm = now.getFullYear() * 12 + now.getMonth();
-    const allowedYms = new Set([currentYm, currentYm - 1]);
+    // allowed calendar month: jis mahine ka data fetch ho raha hai, sirf usi ka
+    const targetYm = targetYear * 12 + targetMonth;
 
     const rows = [];
     for (const cells of rawRows) {
@@ -769,14 +780,14 @@
       if (rowContainsTotalMarker(cells)) continue;
       if (isRowEffectivelyBlank(cells)) continue;
 
-      // Tab already current/pichla mahina scope karta hai, lekin agar us tab ke andar bhi
+      // Tab already us mahine ka scope karta hai, lekin agar us tab ke andar bhi
       // koi purani (e.g. January wali) pending complaint pड़ी ho, to use bhi hata do.
       // Date parse na ho paye (khaali/ajeeb format) to row ko safe rakho — hide mat karo.
       if (complainDateColIdx >= 0) {
         const dt = parseGvizDateValue(cells[complainDateColIdx]?.v ?? cells[complainDateColIdx]?.f);
         if (dt) {
           const ym = dt.getFullYear() * 12 + dt.getMonth();
-          if (!allowedYms.has(ym)) continue;
+          if (ym !== targetYm) continue;
         }
       }
 
