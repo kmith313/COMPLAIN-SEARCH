@@ -453,14 +453,65 @@
 
   function openDetail(m) {
     detailTitle.textContent = `${m.sheetName} • Row ${m.index + 1}`;
-    detailBody.innerHTML = m.row
-      .map((v, i) => {
-        const k = (m.headers[i] || `Col ${i + 1}`).trim() || `Col ${i + 1}`;
-        const delay = i * 30;
-        return `<div class="kv" style="animation-delay:${delay}ms"><div class="kv__k">${escapeHtml(k)}</div><div class="kv__v">${escapeHtml(String(v ?? ""))}</div></div>`;
-      })
-      .join("");
+
+    const replacementDate = getVal(m.headers, m.row, "REPLACEMENT DATE");
+    const isReplaced = !!replacementDate;
+
+    const banner = isReplaced
+      ? `<div class="replaced-banner">
+          <span class="replaced-banner__emoji">🎉</span>
+          <div>
+            <div class="replaced-banner__title">Transformer Replace ho gaya!</div>
+            <div class="replaced-banner__date">${escapeHtml(replacementDate)}</div>
+          </div>
+        </div>`
+      : "";
+
+    detailBody.innerHTML =
+      banner +
+      m.row
+        .map((v, i) => {
+          const k = (m.headers[i] || `Col ${i + 1}`).trim() || `Col ${i + 1}`;
+          const delay = i * 30;
+          return `<div class="kv" style="animation-delay:${delay}ms"><div class="kv__k">${escapeHtml(k)}</div><div class="kv__v">${escapeHtml(String(v ?? ""))}</div></div>`;
+        })
+        .join("");
+
     detailDialog.showModal();
+
+    if (isReplaced) {
+      requestAnimationFrame(() => triggerReplacementCelebration(detailDialog));
+    }
+  }
+
+  function triggerReplacementCelebration(container) {
+    const layer = document.createElement("div");
+    layer.className = "confetti-layer";
+    container.appendChild(layer);
+
+    const colors = ["#22d3c8", "#a78bfa", "#fb7185", "#fbbf24", "#34d399", "#60a5fa"];
+    const PIECE_COUNT = 50;
+    for (let i = 0; i < PIECE_COUNT; i++) {
+      const piece = document.createElement("span");
+      piece.className = "confetti-piece";
+      const left = Math.random() * 100;
+      const delay = Math.random() * 220;
+      const duration = 1000 + Math.random() * 700;
+      const rotate = (Math.random() * 2 - 1) * 540;
+      const drift = (Math.random() - 0.5) * 160;
+      const color = colors[Math.floor(Math.random() * colors.length)];
+      const isRound = Math.random() < 0.35;
+      piece.style.left = left + "%";
+      piece.style.background = color;
+      piece.style.animationDelay = delay + "ms";
+      piece.style.animationDuration = duration + "ms";
+      piece.style.setProperty("--rot", rotate + "deg");
+      piece.style.setProperty("--drift", drift + "px");
+      if (isRound) piece.style.borderRadius = "50%";
+      layer.appendChild(piece);
+    }
+
+    setTimeout(() => layer.remove(), 2000);
   }
 
   // --------- Drawer / Sheet List ----------
@@ -704,11 +755,30 @@
       return -1;
     });
 
+    const complainDatePos = WANTED_COLUMNS.findIndex((n) => normalizeHeader(n) === "COMPLAIN DATE");
+    const complainDateColIdx = complainDatePos >= 0 ? wantedIndices[complainDatePos] : -1;
+
+    // allowed calendar months: current mahina + pichla mahina
+    const now = new Date();
+    const currentYm = now.getFullYear() * 12 + now.getMonth();
+    const allowedYms = new Set([currentYm, currentYm - 1]);
+
     const rows = [];
     for (const cells of rawRows) {
       // "…TOTAL" jaisi summary/blank rows ko skip karo — ye actual complain nahi hai.
       if (rowContainsTotalMarker(cells)) continue;
       if (isRowEffectivelyBlank(cells)) continue;
+
+      // Tab already current/pichla mahina scope karta hai, lekin agar us tab ke andar bhi
+      // koi purani (e.g. January wali) pending complaint pड़ी ho, to use bhi hata do.
+      // Date parse na ho paye (khaali/ajeeb format) to row ko safe rakho — hide mat karo.
+      if (complainDateColIdx >= 0) {
+        const dt = parseGvizDateValue(cells[complainDateColIdx]?.v ?? cells[complainDateColIdx]?.f);
+        if (dt) {
+          const ym = dt.getFullYear() * 12 + dt.getMonth();
+          if (!allowedYms.has(ym)) continue;
+        }
+      }
 
       const outRow = wantedIndices.map((idx) => {
         if (idx < 0) return "";

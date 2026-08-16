@@ -1,4 +1,4 @@
-const CACHE = "sheet-search-pwa-v4";
+const CACHE = "sheet-search-pwa-v6";
 const ASSETS = [
   "./",
   "./index.html",
