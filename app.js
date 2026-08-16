@@ -11,6 +11,30 @@
   const LIVE_SEARCH_DEBOUNCE_MS = 350; // typing par sheet se data leke search
   const LIVE_REFRESH_GAP_MS = 20 * 1000; // har keypress par spam na ho; 20s me max 1 live refresh
 
+  // ====== FIXED COLUMNS (sirf yehi columns rakhne/dikhane hai) ======
+  // Sheet me chahe jitne columns ho, app sirf inhi ko nikaal ke rakhega -> fast + clean.
+  const WANTED_COLUMNS = [
+    "Workshop",
+    "DIVISION",
+    "SUBSTATION",
+    "PLACE OF DAMAGE",
+    "CAPACITY",
+    "COMPLAIN NUMBER",
+    "COMPLAIN DATE",
+    "PR NO",
+    "PR DATE",
+    "JE Name",
+    "ISSUED TO FIRM",
+    "ISSUE DATE",
+    "DRIVER NAME",
+    "DRIVER MOBILE",
+    "REPLACEMENT DATE",
+  ];
+
+  // ====== LAST N MONTHS WINDOW ======
+  // "COMPLAIN DATE" ke hisaab se sirf last N mahine ka data rakha jayega -> scan fast rahega.
+  const MONTHS_WINDOW = 2;
+
   // LOCK MODE: ek hi sheet rahegi, user add/remove/delete nahi kar sakta (UI level par).
   const LOCKED_SINGLE_SHEET_MODE = true;
 
@@ -212,7 +236,7 @@
     const matches = [];
     if (q.length === 0) {
       resultsEl.innerHTML = "";
-      resultMeta.textContent = "Search type karo…";
+      resultMeta.textContent = "Search type karo… (last 2 mahine ka data)";
       return;
     }
 
@@ -297,8 +321,8 @@
   }
 
   function renderResult(m) {
-    const title = pickTitle(m.row);
-    const sub = pickSubtitle(m.row);
+    const title = pickTitle(m.headers, m.row);
+    const sub = pickSubtitle(m.headers, m.row);
     return `<li class="result" role="button" tabindex="0" data-key="${escapeHtml(m.key)}" data-idx="${m.index}">
       <div class="result__top">
         <div class="result__title">${escapeHtml(title)}</div>
@@ -308,12 +332,18 @@
     </li>`;
   }
 
-  function pickTitle(row) {
+  function pickTitle(headers, row) {
+    const num = getVal(headers, row, "COMPLAIN NUMBER");
+    if (num) return `Complain #${num}`;
     return (row.find((x) => (x ?? "").toString().trim()) || "(Row)").toString();
   }
-  function pickSubtitle(row) {
-    const vals = row.map((x) => (x ?? "").toString()).filter((x) => x.trim());
-    return vals.slice(1, 4).join(" • ") || "—";
+  function pickSubtitle(headers, row) {
+    const parts = [
+      getVal(headers, row, "DIVISION"),
+      getVal(headers, row, "SUBSTATION"),
+      getVal(headers, row, "COMPLAIN DATE"),
+    ].filter(Boolean);
+    return parts.join(" • ") || "—";
   }
 
   function openDetail(m) {
@@ -545,17 +575,91 @@
   }
 
   function parseGvizTable(table) {
-    if (!table) return { headers: [], rows: [] };
-    const headers = (table.cols || []).map((c, idx) => (c?.label || c?.id || `Col ${idx + 1}`).toString());
-    const rows = (table.rows || []).map((r) =>
-      (r.c || []).map((cell) => {
+    if (!table) return { headers: WANTED_COLUMNS.slice(), rows: [] };
+
+    const rawHeaders = (table.cols || []).map((c, idx) => (c?.label || c?.id || `Col ${idx + 1}`).toString());
+    const rawRows = (table.rows || []).map((r) => r.c || []);
+
+    // sheet ke actual headers -> index (normalized, case/space-insensitive match)
+    const headerIndexMap = new Map();
+    rawHeaders.forEach((h, idx) => {
+      const key = normalizeHeader(h);
+      if (!headerIndexMap.has(key)) headerIndexMap.set(key, idx);
+    });
+
+    // hamare fixed WANTED_COLUMNS ka sheet me actual index nikalo (jo na mile uska -1)
+    const wantedIndices = WANTED_COLUMNS.map((name) => {
+      const key = normalizeHeader(name);
+      return headerIndexMap.has(key) ? headerIndexMap.get(key) : -1;
+    });
+
+    const complainDatePos = WANTED_COLUMNS.findIndex((n) => normalizeHeader(n) === "COMPLAIN DATE");
+    const complainDateColIdx = complainDatePos >= 0 ? wantedIndices[complainDatePos] : -1;
+
+    const cutoff = monthsAgo(new Date(), MONTHS_WINDOW);
+
+    const rows = [];
+    for (const cells of rawRows) {
+      // Sirf last N mahine ka data rakho (COMPLAIN DATE ke basis par).
+      // Agar date column mile hi nahi, ya kisi row me date parse na ho paye, to us row ko safe rakhte hai.
+      if (complainDateColIdx >= 0) {
+        const dt = parseGvizDateValue(cells[complainDateColIdx]?.v);
+        if (dt && dt < cutoff) continue;
+      }
+
+      const outRow = wantedIndices.map((idx) => {
+        if (idx < 0) return "";
+        const cell = cells[idx];
         if (!cell) return "";
         if (cell.f != null) return String(cell.f);
-        if (cell.v != null) return String(cell.v);
+        if (cell.v != null) {
+          const dt = parseGvizDateValue(cell.v);
+          if (dt && /^Date\(/.test(String(cell.v))) return formatDateOnly(dt);
+          return String(cell.v);
+        }
         return "";
-      })
-    );
-    return { headers, rows };
+      });
+      rows.push(outRow);
+    }
+
+    return { headers: WANTED_COLUMNS.slice(), rows };
+  }
+
+  function normalizeHeader(s) {
+    return String(s || "").trim().toUpperCase().replace(/\s+/g, " ");
+  }
+
+  function monthsAgo(date, n) {
+    const d = new Date(date.getTime());
+    d.setMonth(d.getMonth() - n);
+    return d;
+  }
+
+  function parseGvizDateValue(raw) {
+    if (raw == null) return null;
+    const s = String(raw);
+    // GViz date cell format: Date(YYYY,M,D) ya Date(YYYY,M,D,H,Mi,S) — M yaha 0-indexed hota hai.
+    const m = s.match(/^Date\((\d+),(\d+),(\d+)(?:,(\d+),(\d+),(\d+))?\)$/);
+    if (m) {
+      const [, y, mo, d, h, mi, se] = m;
+      return new Date(Number(y), Number(mo), Number(d), Number(h || 0), Number(mi || 0), Number(se || 0));
+    }
+    const fallback = new Date(s);
+    return isNaN(fallback.getTime()) ? null : fallback;
+  }
+
+  function formatDateOnly(d) {
+    try {
+      return d.toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "numeric" });
+    } catch {
+      return d.toDateString();
+    }
+  }
+
+  function getVal(headers, row, name) {
+    const idx = headers.findIndex((h) => normalizeHeader(h) === normalizeHeader(name));
+    if (idx < 0) return "";
+    return (row[idx] ?? "").toString().trim();
   }
 
   function buildDefaultName(id, extra) {
