@@ -31,11 +31,17 @@
     "REPLACEMENT DATE",
   ];
 
-  // ====== CALENDAR MONTHS TO SHOW ======
-  // "COMPLAIN DATE" ke calendar month ke hisaab se filter hota hai (rolling 60 days nahi).
-  // Example: aaj Aug-2026 hai to sirf AUG-2026 + JULY-2026 ka data milega.
-  // Har mahine ke aakhir me jo "XXX-2026 TOTAL" jaisi summary row hoti hai, wo automatically results se hat jati hai.
-  const NUM_CALENDAR_MONTHS = 2;
+  // ====== MONTH TABS ======
+  // Ye sheet me har mahine ka apna tab hota hai (e.g. "JULY-2026", "AUG-2026 TOTAL").
+  // Current mahine wale tab me "TOTAL" suffix hota hai; pichle mahine wale tab me nahi.
+  // App khud dono tab dhoondh ke unka data jodta hai — kisi fix gid/tabName ki zaroorat nahi.
+  const MONTH_ABBR = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+  const MONTH_FULL = [
+    "JANUARY", "FEBRUARY", "MARCH", "APRIL", "MAY", "JUNE",
+    "JULY", "AUGUST", "SEPTEMBER", "OCTOBER", "NOVEMBER", "DECEMBER",
+  ];
+  const TAB_RESOLVE_CACHE_KEY = "sheet-search-tab-resolve-v1";
+  let tabResolveCache = loadTabResolveCache();
 
   // LOCK MODE: ek hi sheet rahegi, user add/remove/delete nahi kar sakta (UI level par).
   const LOCKED_SINGLE_SHEET_MODE = true;
@@ -47,7 +53,7 @@
   // const DEFAULT_SHEETS = [{ url: "https://docs.google.com/spreadsheets/d/XXXX/edit#gid=0", name: "COMPILE", tabName: "COMPILE" }];
   const DEFAULT_SHEETS = [
     {
-      url: "https://docs.google.com/spreadsheets/d/1qjOJ879V4FGGQtf2RvqjtSH1eHzGXh4fARJZE0LtdnM/edit?gid=1464518527#gid=1464518527",
+      url: "https://docs.google.com/spreadsheets/d/1qjOJ879V4FGGQtf2RvqjtSH1eHzGXh4fARJZE0LtdnM/edit",
       name: "COMPILE"
     }
   ];
@@ -102,7 +108,10 @@
   btnMenu.addEventListener("click", openDrawer);
   btnCloseDrawer.addEventListener("click", closeDrawer);
   backdrop.addEventListener("click", closeDrawer);
-  btnRefresh.addEventListener("click", () => refreshAll({ showStatus: true }));
+  btnRefresh.addEventListener("click", () => {
+    btnRefresh.classList.add("spinning");
+    refreshAll({ showStatus: true }).finally(() => btnRefresh.classList.remove("spinning"));
+  });
 
   btnClearCache.addEventListener("click", () => {
     if (!confirm("Cache clear karna hai? (Sheet list rahegi, sirf data cache delete hoga)")) return;
@@ -210,16 +219,100 @@
   }
 
   async function refreshSheet(sheet) {
-    const url = buildGvizUrl(sheet.id, sheet);
-    const resp = await gvizRequest(url);
-    if (resp?.status === "error") {
-      const msg = resp?.errors?.[0]?.detailed_message || "GViz error";
-      throw new Error(msg);
+    const now = new Date();
+    const curY = now.getFullYear();
+    const curM = now.getMonth();
+    let prevY = curY;
+    let prevM = curM - 1;
+    if (prevM < 0) {
+      prevM = 11;
+      prevY -= 1;
     }
-    const parsed = parseGvizTable(resp?.table);
-    const payload = { ...parsed, updatedAt: Date.now() };
+
+    const curResolved = await resolveMonthTab(sheet.id, curY, curM, { preferTotal: true });
+    const prevResolved = await resolveMonthTab(sheet.id, prevY, prevM, { preferTotal: false });
+
+    const tables = [curResolved, prevResolved].filter((r) => r && r.table);
+    if (tables.length === 0) {
+      throw new Error("Current/pichle mahine ka tab nahi mila (tab naam check karo)");
+    }
+
+    let mergedRows = [];
+    for (const r of tables) {
+      const parsed = parseGvizTable(r.table);
+      mergedRows = mergedRows.concat(parsed.rows);
+    }
+
+    const payload = {
+      headers: WANTED_COLUMNS.slice(),
+      rows: mergedRows,
+      updatedAt: Date.now(),
+      tabs: tables.map((r) => r.tabName),
+    };
     cacheMap.set(sheetKey(sheet), payload);
     localStorage.setItem(STORAGE_CACHE_PREFIX + sheetKey(sheet), JSON.stringify(payload));
+  }
+
+  // ---- Month tab resolution (koi bhi naam-format try karta hai jab tak sahi tab na mil jaye) ----
+
+  function loadTabResolveCache() {
+    try {
+      const raw = localStorage.getItem(TAB_RESOLVE_CACHE_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
+  }
+  function saveTabResolveCache() {
+    try {
+      localStorage.setItem(TAB_RESOLVE_CACHE_KEY, JSON.stringify(tabResolveCache));
+    } catch {}
+  }
+
+  function buildTabNameCandidates(year, month, { preferTotal }) {
+    const y4 = String(year);
+    const y2 = y4.slice(-2);
+    const abbr = MONTH_ABBR[month];
+    const full = MONTH_FULL[month];
+    const bases = [`${abbr}-${y4}`, `${full}-${y4}`, `${abbr}-${y2}`, `${full}-${y2}`, `${abbr} ${y4}`, `${full} ${y4}`];
+    const withTotal = bases.flatMap((b) => [`${b} TOTAL`, `${b}-TOTAL`]);
+    const list = preferTotal ? [...withTotal, ...bases] : [...bases, ...withTotal];
+    return Array.from(new Set(list));
+  }
+
+  async function resolveMonthTab(spreadsheetId, year, month, { preferTotal }) {
+    const cacheKey = `${spreadsheetId}|${year}-${month}`;
+    const cachedName = tabResolveCache[cacheKey];
+
+    // pehle cached (pichli baar kaam kiya) tab name try karo — fast path
+    if (cachedName) {
+      const hit = await tryFetchTab(spreadsheetId, cachedName);
+      if (hit) return hit;
+      delete tabResolveCache[cacheKey]; // ab kaam nahi kiya, cache clear karo
+    }
+
+    const candidates = buildTabNameCandidates(year, month, { preferTotal });
+    for (const name of candidates) {
+      const hit = await tryFetchTab(spreadsheetId, name);
+      if (hit) {
+        tabResolveCache[cacheKey] = name;
+        saveTabResolveCache();
+        return hit;
+      }
+    }
+    return null;
+  }
+
+  async function tryFetchTab(spreadsheetId, tabName) {
+    try {
+      const url = buildGvizUrl(spreadsheetId, { tabName });
+      const resp = await gvizRequest(url);
+      if (resp?.status === "error") return null;
+      if (!resp?.table) return null;
+      return { tabName, table: resp.table };
+    } catch {
+      return null;
+    }
   }
 
   // --------- Search ----------
@@ -363,7 +456,8 @@
     detailBody.innerHTML = m.row
       .map((v, i) => {
         const k = (m.headers[i] || `Col ${i + 1}`).trim() || `Col ${i + 1}`;
-        return `<div class="kv"><div class="kv__k">${escapeHtml(k)}</div><div class="kv__v">${escapeHtml(String(v ?? ""))}</div></div>`;
+        const delay = i * 30;
+        return `<div class="kv" style="animation-delay:${delay}ms"><div class="kv__k">${escapeHtml(k)}</div><div class="kv__v">${escapeHtml(String(v ?? ""))}</div></div>`;
       })
       .join("");
     detailDialog.showModal();
@@ -592,41 +686,29 @@
     const rawHeaders = (table.cols || []).map((c, idx) => (c?.label || c?.id || `Col ${idx + 1}`).toString());
     const rawRows = (table.rows || []).map((r) => r.c || []);
 
-    // sheet ke actual headers -> index (normalized, case/space-insensitive match)
+    // sheet ke actual headers -> index (normalized, case/space/punctuation-insensitive match)
     const headerIndexMap = new Map();
     rawHeaders.forEach((h, idx) => {
       const key = normalizeHeader(h);
-      if (!headerIndexMap.has(key)) headerIndexMap.set(key, idx);
+      if (key && !headerIndexMap.has(key)) headerIndexMap.set(key, idx);
     });
 
     // hamare fixed WANTED_COLUMNS ka sheet me actual index nikalo (jo na mile uska -1)
+    // 1) exact normalized match  2) substring fallback (jaise "Workshop Name" -> "Workshop")
     const wantedIndices = WANTED_COLUMNS.map((name) => {
       const key = normalizeHeader(name);
-      return headerIndexMap.has(key) ? headerIndexMap.get(key) : -1;
+      if (headerIndexMap.has(key)) return headerIndexMap.get(key);
+      for (const [hKey, idx] of headerIndexMap.entries()) {
+        if (hKey.includes(key) || key.includes(hKey)) return idx;
+      }
+      return -1;
     });
-
-    const complainDatePos = WANTED_COLUMNS.findIndex((n) => normalizeHeader(n) === "COMPLAIN DATE");
-    const complainDateColIdx = complainDatePos >= 0 ? wantedIndices[complainDatePos] : -1;
-
-    // allowed calendar months: current mahina + pichhle (NUM_CALENDAR_MONTHS - 1) mahine
-    const now = new Date();
-    const currentYm = now.getFullYear() * 12 + now.getMonth();
-    const allowedYms = new Set();
-    for (let i = 0; i < NUM_CALENDAR_MONTHS; i++) allowedYms.add(currentYm - i);
 
     const rows = [];
     for (const cells of rawRows) {
-      // Mahine ke aakhir wali "XXX-2026 TOTAL" jaisi summary/blank rows ko skip karo — ye actual complain nahi hai.
+      // "…TOTAL" jaisi summary/blank rows ko skip karo — ye actual complain nahi hai.
       if (rowContainsTotalMarker(cells)) continue;
-
-      // Sirf current + pichla calendar month rakho (COMPLAIN DATE ke basis par).
-      // Date missing/unparseable ho to us row ka mahina confirm nahi ho sakta, isliye skip.
-      if (complainDateColIdx >= 0) {
-        const dt = parseGvizDateValue(cells[complainDateColIdx]?.v);
-        if (!dt) continue;
-        const ym = dt.getFullYear() * 12 + dt.getMonth();
-        if (!allowedYms.has(ym)) continue;
-      }
+      if (isRowEffectivelyBlank(cells)) continue;
 
       const outRow = wantedIndices.map((idx) => {
         if (idx < 0) return "";
@@ -655,19 +737,57 @@
     return false;
   }
 
+  function isRowEffectivelyBlank(cells) {
+    return !cells.some((cell) => {
+      if (!cell) return false;
+      const text = (cell.f != null ? String(cell.f) : cell.v != null ? String(cell.v) : "").trim();
+      return text.length > 0;
+    });
+  }
+
   function normalizeHeader(s) {
-    return String(s || "").trim().toUpperCase().replace(/\s+/g, " ");
+    let t = String(s || "")
+      .replace(/\(.*?\)/g, " ") // "(DD/MM/YYYY)" jaise notes hatao
+      .toUpperCase()
+      .replace(/[^A-Z0-9]+/g, " ")
+      .trim();
+    // "NUMBER"/"NUM"/"NO." jaise variants ko ek se canonical "NO" me convert karo
+    t = t.replace(/\bNUMBER\b/g, "NO").replace(/\bNUM\b/g, "NO").replace(/\bNO\b/g, "NO");
+    // MOBILE/PHONE/CONTACT ke "... NO" suffix ko ek canonical form me convert karo
+    t = t.replace(/\b(MOBILE|PHONE|CONTACT)\s+NO\b/g, "MOBILE");
+    return t.replace(/\s+/g, " ").trim();
   }
 
   function parseGvizDateValue(raw) {
     if (raw == null) return null;
-    const s = String(raw);
+    const s = String(raw).trim();
+    if (!s) return null;
+
     // GViz date cell format: Date(YYYY,M,D) ya Date(YYYY,M,D,H,Mi,S) — M yaha 0-indexed hota hai.
-    const m = s.match(/^Date\((\d+),(\d+),(\d+)(?:,(\d+),(\d+),(\d+))?\)$/);
+    let m = s.match(/^Date\((\d+),(\d+),(\d+)(?:,(\d+),(\d+),(\d+))?\)$/);
     if (m) {
       const [, y, mo, d, h, mi, se] = m;
       return new Date(Number(y), Number(mo), Number(d), Number(h || 0), Number(mi || 0), Number(se || 0));
     }
+
+    // DD-MM-YYYY / DD/MM/YYYY / DD.MM.YYYY (Indian convention; 2 ya 4 digit year)
+    m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/);
+    if (m) {
+      const [, dd, mo, yy] = m;
+      let year = Number(yy);
+      if (year < 100) year += 2000;
+      const dt = new Date(year, Number(mo) - 1, Number(dd));
+      if (!isNaN(dt.getTime())) return dt;
+    }
+
+    // ISO format YYYY-MM-DD
+    m = s.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
+    if (m) {
+      const [, yy, mo, dd] = m;
+      const dt = new Date(Number(yy), Number(mo) - 1, Number(dd));
+      if (!isNaN(dt.getTime())) return dt;
+    }
+
     const fallback = new Date(s);
     return isNaN(fallback.getTime()) ? null : fallback;
   }
